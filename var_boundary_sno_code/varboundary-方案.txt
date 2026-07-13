@@ -1,0 +1,542 @@
+下面是根据你刚刚修正后的符号约定重新整理的**任意曲线内边界 SNO 当前实施方案**。这版已经统一为：
+
+[
+g_{\rm PI}
+==========
+
+\left(
+-e_r+\frac{\dot a}{a}e_\theta
+\right)\cdot\nabla P
+]
+
+并去掉了无关细节，只保留核心思想和关键实现约定。
+
+---
+
+# 任意曲线内边界 SNO 当前实施方案
+
+## 1. 目标问题
+
+求解二维动水力压力型变量 (P)，控制方程为
+
+[
+\Delta P-k^2P=f.
+]
+
+真实推理问题主要关注齐次源项情形：
+
+[
+f=0.
+]
+
+内边界为任意星形曲线：
+
+[
+r=a(\theta),
+]
+
+外边界采用相似放大形式：
+
+[
+b(\theta)=5a(\theta).
+]
+
+因此物理计算区域为：
+
+[
+\Omega_\Gamma
+=============
+
+{(r,\theta):a(\theta)\le r\le 5a(\theta)}.
+]
+
+问题描述给出的目标内边界通量为：
+
+[
+g_{\rm target}(\theta)
+======================
+
+# \cos\alpha
+
+\cos\theta+
+\frac{\dot a(\theta)}{a(\theta)}\sin\theta,
+\qquad
+\dot a=\frac{da}{d\theta}.
+]
+
+这里分母是 (a(\theta))，不是 (\sqrt{a^2+\dot a^2})。
+
+---
+
+## 2. 标准域与物理域映射
+
+为了让 FE 和 Transformer 处理固定拓扑、固定尺寸的数据，引入标准圆环：
+
+[
+\hat\Omega
+==========
+
+{(\rho,\theta):0.2\le\rho\le1.0,\ 0\le\theta<2\pi}.
+]
+
+物理域映射为：
+
+[
+r(\rho,\theta)
+==============
+
+a(\theta)
++
+\frac{\rho-0.2}{0.8}
+\left[b(\theta)-a(\theta)\right].
+]
+
+由于当前取：
+
+[
+b(\theta)=5a(\theta),
+]
+
+所以：
+
+[
+r(\rho,\theta)=5\rho a(\theta).
+]
+
+物理坐标为：
+
+[
+x=5\rho a(\theta)\cos\theta,
+\qquad
+y=5\rho a(\theta)\sin\theta.
+]
+
+FE trunk 始终输入标准域坐标：
+
+[
+\hat x=\rho\cos\theta,
+\qquad
+\hat y=\rho\sin\theta.
+]
+
+物理域坐标只用于：
+
+1. PI-sampler 生成 (P,f)；
+2. 物理残差计算；
+3. FEM 对比；
+4. MATLAB 可视化。
+
+当前配置文件也明确规定标准域为 ([0.2,1.0])，物理域为 (a(\theta)\le r\le b(\theta))，且 (b=\text{outer_scale}\cdot a)。
+
+---
+
+## 3. 几何生成方式
+
+内边界由周期 BNN 生成：
+
+[
+a(\theta)
+=========
+
+0.12+
+0.08\tanh\left(0.3r_{\rm BNN}(\theta)\right).
+]
+
+因此：
+
+[
+a(\theta)\in(0.04,0.20).
+]
+
+几何 BNN 的输入采用周期特征：
+
+[
+[\sin\theta,\cos\theta],
+]
+
+从而保证 (a(\theta)) 的周期闭合性。代码中 `sample_geometry_params` 和 `eval_radius_single` 按该方式生成几何。
+
+---
+
+## 4. PI-sampler 数据生成
+
+当前训练数据不由传统数值求解器生成，而由 PI-sampler 自监督生成。
+
+对每个样本：
+
+1. 随机生成几何 (a(\theta))；
+2. 随机生成原始场 (P_{\rm BNN}(x,y))；
+3. 通过 hard constraint 构造满足外边界 Dirichlet 条件的解：
+
+[
+P(x,y)
+======
+
+\left[r-b(\theta)\right]P_{\rm BNN}(x,y).
+]
+
+因为当 (r=b(\theta)) 时：
+
+[
+P=0.
+]
+
+4. 使用笛卡尔坐标 AD 计算源项：
+
+[
+f(x,y)
+======
+
+\Delta_{x,y}P(x,y)-k^2P(x,y).
+]
+
+这里必须对完整的 (P(x,y)) 做笛卡尔二阶自动微分，不能使用规则圆环下的简化极坐标公式。原因是任意边界时 (b(\theta)) 依赖角度，(\dot b,\ddot b) 相关项会进入拉普拉斯算子。
+
+当前代码中 `constructed_solution_single` 构造 (P=(r-b)P_{\rm BNN})，`eval_solution_source_single` 通过 `jax.hessian` 对物理坐标 (x,y) 计算 (\Delta P) 和 (f)。
+
+---
+
+## 5. 内边界通量约定
+
+这是本版方案中最重要的修正。
+
+当前 PI-sampler 中诱导的内边界通量使用的是流体域内边界外法向方向对应的非单位算子：
+
+[
+\boxed{
+g_{\rm PI}(\theta)
+==================
+
+\left.
+\left(
+-e_r+
+\frac{\dot a(\theta)}{a(\theta)}e_\theta
+\right)
+\cdot\nabla P
+\right|_{r=a(\theta)}
+}
+]
+
+而不是
+
+[
+\left(
+e_r-\frac{\dot a}{a}e_\theta
+\right)\cdot\nabla P.
+]
+
+当 (a'(\theta)=0) 时，该约定退化为：
+
+[
+g_{\rm PI}=-e_r\cdot\nabla P.
+]
+
+训练阶段，Transformer 学习的是：
+
+[
+(f,g_{\rm PI},k)\mapsto P.
+]
+
+真实推理阶段，例如圆形、正方形、正五边形等实际边界，则输入问题给定的目标通量：
+
+[
+\boxed{
+g_{\rm target}(\theta)
+======================
+
+\cos\theta+
+\frac{\dot a(\theta)}{a(\theta)}\sin\theta
+}
+]
+
+作为边界条件 token。
+
+因此，当前方案必须区分：
+
+[
+g_{\rm PI}
+==========
+
+\left(
+-e_r+\frac{\dot a}{a}e_\theta
+\right)\cdot\nabla P,
+]
+
+和
+
+[
+g_{\rm target}
+==============
+
+\cos\theta+\frac{\dot a}{a}\sin\theta.
+]
+
+前者是训练数据中由随机解诱导出的边界通量，后者是真实物理问题推理时输入的目标边界条件。
+
+---
+
+## 6. Function Encoder 设计
+
+FE 用于学习 (u=P) 和 (f) 在标准圆环上的低维连续表示。
+
+所有场变量先拉回标准域网格：
+
+[
+(\hat x_i,\hat y_i)\in\hat\Omega.
+]
+
+FE 结构为 two-branch one-trunk DeepONet：
+
+[
+u(\hat x)
+\approx
+\frac{1}{\sqrt p}
+\sum_{j=1}^{p}z_{u,j}\phi_j(\hat x),
+]
+
+[
+f(\hat x)
+\approx
+\frac{1}{\sqrt p}
+\sum_{j=1}^{p}z_{f,j}\phi_j(\hat x).
+]
+
+其中：
+
+* `branch_u` 编码 (u)；
+* `branch_f` 编码 (f)；
+* trunk 输入标准域坐标 ((\hat x,\hat y))；
+* trunk 输出共享空间基函数 (\phi_j)。
+
+当前 `FunctionEncoder` 中包含 `branch_u`、`branch_f` 和 canonical-coordinate trunk，并通过 latent 与 trunk basis 的内积重构场变量。
+
+FE 训练的基础损失为：
+
+[
+\mathcal L_{\rm FE}
+===================
+
+|u_{\rm pred}-u|^2
++
+|f_{\rm pred}-f|^2.
+]
+
+如加入物理损失，应在物理域中计算：
+
+[
+\Delta_x P_{\rm FE}-k^2P_{\rm FE}-f=0.
+]
+
+由于 trunk 定义在标准域，物理残差必须对复合函数求导：
+
+[
+P_{\rm FE}(x,y)
+===============
+
+\hat P_{\rm FE}\left(\Phi_\Gamma^{-1}(x,y)\right).
+]
+
+当前 `physical_residual_loss` 的设计就是：先将物理点映射回标准域，再对 (u(\Phi^{-1}(x,y))) 关于物理坐标求 Hessian。
+
+---
+
+## 7. Transformer 算子学习
+
+Transformer 学习 latent 空间中的算子映射：
+
+[
+(z_f,\text{bc},k)\mapsto z_u.
+]
+
+其中：
+
+[
+z_f=\mathrm{FE}_f(f),
+\qquad
+z_u=\mathrm{FE}_u(u).
+]
+
+边界 token 包含：
+
+[
+[x_b(\theta_j),y_b(\theta_j),g(\theta_j)].
+]
+
+训练时：
+
+[
+g=g_{\rm PI}.
+]
+
+真实推理时：
+
+[
+g=g_{\rm target}.
+]
+
+几何不单独作为额外 token 输入。几何信息已经通过：
+
+[
+x_b=a(\theta)\cos\theta,
+\qquad
+y_b=a(\theta)\sin\theta,
+]
+
+以及边界通量 (g(\theta)) 进入模型。
+
+当前 `OperatorTransformer` 输入为 `f_tokens`、`bc_tokens` 和 `k_values`，其中 `bc_tokens` 的每个边界点包含 `[x_b,y_b,flux]`。
+
+---
+
+## 8. 推理流程
+
+对于实际边界 (a(\theta))，例如圆形、正方形、正五边形或任意给定曲线：
+
+1. 给定 (a(\theta))；
+2. 计算 (\dot a(\theta))；
+3. 构造内边界坐标：
+
+[
+x_b=a(\theta)\cos\theta,
+\qquad
+y_b=a(\theta)\sin\theta;
+]
+
+4. 构造目标边界通量：
+
+[
+g_{\rm target}
+==============
+
+\cos\theta+
+\frac{\dot a}{a}\sin\theta;
+]
+
+5. 设置 (f=0)；
+6. 用 FE 的 (f)-branch 编码得到 (z_f)；
+7. 构造 Transformer 输入：
+
+[
+(z_f,[x_b,y_b,g_{\rm target}],k);
+]
+
+8. Transformer 输出预测解 latent：
+
+[
+\hat z_u;
+]
+
+9. 用 FE trunk 在标准域坐标上重构：
+
+[
+\hat u(\hat x)
+==============
+
+\frac{1}{\sqrt p}
+\sum_j \hat z_{u,j}\phi_j(\hat x).
+]
+
+若需要物理域结果，则通过：
+
+[
+r=5\rho a(\theta)
+]
+
+映射到物理坐标。
+
+---
+
+## 9. 与 FEM / PCG 初值实验的接口
+
+与 FEM 对比时，不能把低分辨率预测解插值到 FEM 网格。正确做法是直接在 FEM 对应的高分辨率标准域坐标上重构预测解。
+
+若 FEM 网格使用：
+
+[
+s\in[1,5],
+\qquad
+r=s,a(\theta),
+]
+
+则标准域半径为：
+
+[
+\rho=\frac{s}{5}.
+]
+
+因此 FE trunk 输入应为：
+
+[
+\hat x=\rho\cos\theta,
+\qquad
+\hat y=\rho\sin\theta.
+]
+
+然后直接用 Transformer 输出的 (\hat z_u) 在这些坐标上重构：
+
+[
+u_{\rm pred}^{\rm ref}
+======================
+
+\mathrm{FE}*{\rm trunk}(\hat z_u,\hat x*{\rm ref}).
+]
+
+这样导出的 (u_{\rm pred}^{\rm ref}) 与 FEM 网格节点一一对应，可直接作为 PCG 初值。
+
+---
+
+# 最终核心总结
+
+当前任意曲线内边界 SNO 的核心思想是：
+
+[
+\boxed{
+\text{标准圆环上学习低维表示，
+物理域中生成数据与计算残差，
+用内边界坐标和通量编码几何，
+由 Transformer 学习 }(f,g,k)\mapsto P
+}
+]
+
+关键约定是：
+
+[
+\boxed{
+g_{\rm PI}
+==========
+
+\left(
+-e_r+\frac{\dot a}{a}e_\theta
+\right)\cdot\nabla P
+}
+]
+
+用于 PI-sampler 训练数据；
+
+[
+\boxed{
+g_{\rm target}
+==============
+
+\cos\theta+
+\frac{\dot a}{a}\sin\theta
+}
+]
+
+用于真实物理问题推理；
+
+[
+\boxed{
+P(x,y)=(r-b(\theta))P_{\rm BNN}(x,y)
+}
+]
+
+用于 hard enforce 外边界 (P=0)；
+
+[
+\boxed{
+r=5\rho a(\theta)
+}
+]
+
+用于标准域到物理域映射。

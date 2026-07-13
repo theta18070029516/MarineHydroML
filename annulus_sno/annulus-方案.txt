@@ -1,0 +1,852 @@
+下面是一份可直接保存为新窗口记忆文件的**完整总结方案**。我已按你最新确认的状态修正：**不再叙述已经废弃的原始 hard-coded ansatz**；当前采样明确为
+
+[
+r\sim U(r_{\rm inner},r_{\rm outer}),
+\qquad
+\theta\sim U(0,2\pi),
+]
+
+不是面积均匀采样。
+
+---
+
+# 规则环域 SNO 算子学习方案总结
+
+## 1. 当前问题定义
+
+当前研究对象是二维固定环域上的线性椭圆型 PDE：
+
+[
+\Delta P-k^2P=f,
+\qquad (x,y)\in\Omega,
+]
+
+其中环域为
+
+[
+\Omega={(x,y): r_{\rm inner}\le r=\sqrt{x^2+y^2}\le r_{\rm outer}}.
+]
+
+常用归一化几何为：
+
+[
+r_{\rm inner}=0.2,\qquad r_{\rm outer}=1.0.
+]
+
+外边界条件为 Dirichlet：
+
+[
+P(r_{\rm outer},\theta)=0.
+]
+
+内边界条件为 Neumann：
+
+[
+\frac{\partial P}{\partial n}(r_{\rm inner},\theta)=g(\theta).
+]
+
+对于 (f=0) benchmark，取：
+
+[
+g(\theta)=\cos\theta.
+]
+
+需要特别注意内边界法向：内边界是环域孔洞边界，流体域外法向为
+
+[
+n=-e_r.
+]
+
+因此
+
+[
+\frac{\partial P}{\partial n}
+=============================
+
+-\frac{\partial P}{\partial r}.
+]
+
+所以当
+
+[
+\partial_nP=\cos\theta
+]
+
+时，等价于
+
+[
+\partial_rP(r_{\rm inner},\theta)=-\cos\theta.
+]
+
+这是解析解、BVP 对照、物理 loss 和边界 token 构造中最关键的符号。
+
+---
+
+## 2. 当前 SNO 学习目标
+
+当前 SNO 不是直接反演 (k)，而是学习前向参数化算子：
+
+[
+\mathcal{G}:\ (f,\ g_{\rm inner},\ k)\mapsto P.
+]
+
+即输入源项 (f)、内边界 Neumann 数据 (g_{\rm inner}) 和参数 (k)，输出解场 (P)。
+
+若未来要通过已知控制方程、边界响应或观测压力场反推 (k)，需要额外引入观测数据和反问题 loss。仅靠当前 PDE 与边界条件，本质上是前向求解问题，而不是唯一确定 (k) 的反问题。
+
+---
+
+## 3. 与 scifm/SNO 框架的对应关系
+
+当前方案遵循 `scifm.pdf` 中的 SNO 三部分框架：
+
+1. **PI-sampler**：基于 BNN prior 和自动微分在线生成训练数据；
+2. **Function Encoder, FE**：学习 (P) 和 (f) 的紧致 latent 表示；
+3. **Encoder-only Transformer**：学习从源项、边界条件、参数到解 latent 的算子映射。
+
+`scifm.pdf` 明确说明 SNO 由 PI-sampler、Function Encoder 和 encoder-only Transformer 三部分组成；PI-sampler 用 BNN prior 和 AD 生成 ((f,b,u)) 数据，FE 用共享 basis 表示 (u,f)，Transformer 学习从 (f/b/u_0) 等输入表征到解表征的映射。
+
+---
+
+## 4. 固定环域几何处理原则
+
+当前环域本身就是 reference domain。
+
+因此：
+
+* 不映射到单位圆；
+* 不做变几何 homeomorphic transform；
+* trunk 输入直接使用笛卡尔坐标 ((x,y))；
+* 所有网格点、probe 点、边界点均在真实环域上构造。
+
+`AnnulusConfig` 中也明确说明当前版本 treats the annulus itself as the reference domain，不使用 unit disk 或其他 canonical geometry。
+
+---
+
+## 5. 当前 PI-sampler 解场构造
+
+当前 PI-sampler 采用：
+
+[
+P=(r-r_{\rm outer})P_{\rm BNN}(x,y).
+]
+
+该形式只 hard enforce 外边界 Dirichlet 条件：
+
+[
+P(r_{\rm outer},\theta)=0.
+]
+
+内边界 Neumann 条件不再通过 ansatz 强制，而是由每个样本自动诱导得到：
+
+[
+g(\theta)=\partial_nP(r_{\rm inner},\theta),
+]
+
+并作为 Transformer 的边界条件输入。
+
+对于
+
+[
+P=(r-r_{\rm outer})P_{\rm BNN},
+]
+
+有
+
+[
+\partial_rP
+===========
+
+P_{\rm BNN}
++
+(r-r_{\rm outer})\partial_rP_{\rm BNN}.
+]
+
+由于内边界外法向
+
+[
+n=-e_r,
+]
+
+所以
+
+[
+g(\theta)
+=========
+
+# \partial_nP
+
+-\partial_rP.
+]
+
+因此
+
+[
+g(\theta)
+=========
+
+-\left[
+P_{\rm BNN}
++
+(r_{\rm inner}-r_{\rm outer})\partial_rP_{\rm BNN}
+\right]*{r=r*{\rm inner}}.
+]
+
+源项统一由完整构造场计算：
+
+[
+f=\Delta P-k^2P.
+]
+
+其中
+
+[
+\Delta P
+========
+
+(r-r_{\rm outer})\Delta P_{\rm BNN}
++
+2\partial_rP_{\rm BNN}
++
+\frac{P_{\rm BNN}}{r}.
+]
+
+当前 `data_annulus.py` 中已经实现了 `outer_dirichlet_solution_and_source` 和 `outer_dirichlet_inner_flux`，前者构造 (u=(r-r_{\rm outer})raw_u) 并计算 (f=\Delta u-k^2u)，后者根据内边界 (n=-e_r) 计算 (g=\partial_nu)。
+
+---
+
+## 6. 当前采样方式
+
+当前采样方式是直接半径均匀采样：
+
+[
+r\sim U(r_{\rm inner},r_{\rm outer}),
+\qquad
+\theta\sim U(0,2\pi).
+]
+
+然后转为笛卡尔坐标：
+
+[
+x=r\cos\theta,
+\qquad
+y=r\sin\theta.
+]
+
+这不是面积均匀采样。面积均匀采样应为：
+
+[
+r^2\sim U(r_{\rm inner}^2,r_{\rm outer}^2).
+]
+
+但当前代码中 `sobol_annulus_points` 的实现是：
+
+[
+r=r_{\rm inner}+u_1(r_{\rm outer}-r_{\rm inner}),
+\qquad
+\theta=2\pi u_2,
+]
+
+即直接 (r) 均匀采样。该状态需要在新窗口中保留，避免后续误以为当前训练分布是面积均匀分布。
+
+---
+
+## 7. 数据结构与 `SampleBatch`
+
+当前 `SampleBatch` 包含：
+
+```python
+boundary_coords: [B, Nt, 2]
+boundary_flux:  [B, Nt]
+pod_coords:     [Npod, 2]
+probe_coords:   [Nprobe, 2]
+u_pod:          [B, Npod]
+f_pod:          [B, Npod]
+u_probe:        [B, Nprobe]
+f_probe:        [B, Nprobe]
+k_values:       [B]
+```
+
+其中：
+
+[
+N_{\rm pod}=N_rN_\theta.
+]
+
+当前 `sample_batch` 的有效 batch size 是：
+
+[
+B_{\rm eff}=num_repeats\times sample_size.
+]
+
+例如 `num_repeats=3` 且 `sample_size=256` 时，实际返回样本数为 768。`data_annulus.py` 中 `SampleBatch` 字段和 `sample_batch` 注释都明确了这些 shape。
+
+---
+
+## 8. Function Encoder, FE 结构
+
+当前 FE 是 CNN-branch DeepONet 结构：
+
+* `branch_u`：输入规则网格上的归一化 (P/u)，输出 (z_u)；
+* `branch_f`：输入规则网格上的归一化 (f)，输出 (z_f)；
+* shared `trunk`：输入任意坐标 ((x,y))，输出空间 basis (\phi(x,y))。
+
+重构公式：
+
+[
+\hat{\gamma}_{\rm norm}(x)
+==========================
+
+\frac{1}{\sqrt{p}}
+z_\gamma\cdot\phi(x),
+\qquad
+\gamma\in{P,f}.
+]
+
+这里 (p=n_{\rm basis})。
+
+当前 `models_annulus.py` 中 `FunctionEncoder` 包含 `branch_u`、`branch_f` 和共享 `trunk`，并通过
+
+```python
+jnp.einsum('bd,nd->bn', latent, basis) / sqrt(n_basis)
+```
+
+重构场值。
+
+---
+
+## 9. 归一化策略
+
+FE 输入和输出都使用全局 scalar normalizer：
+
+[
+u_{\rm norm}=\frac{u-\mu_u}{\sigma_u},
+\qquad
+f_{\rm norm}=\frac{f-\mu_f}{\sigma_f}.
+]
+
+因此：
+
+* 输入 `branch_u` 前必须使用 `normalize_u`；
+* 输入 `branch_f` 前必须使用 `normalize_f`；
+* FE 输出如果要进入物理 loss、MATLAB 后处理或误差计算，必须 `denormalize_u` / `denormalize_f`；
+* (f=0) 输入时，不能把 normalized 输入设成 0，而应构造物理零场后 normalize：
+
+[
+f_{\rm zero,norm}=\frac{0-\mu_f}{\sigma_f}.
+]
+
+因为
+
+[
+f_{\rm norm}=0
+]
+
+表示物理空间中的
+
+[
+f=\mu_f,
+]
+
+不是
+
+[
+f=0.
+]
+
+`data_annulus.py` 中实现了 `build_field_normalizer`、`normalize_u`、`denormalize_u`、`normalize_f`、`denormalize_f`。
+
+---
+
+## 10. FE 训练损失
+
+基础数据损失为：
+
+[
+\mathcal{L}_{FE,data}
+=====================
+
+|\hat u_{\rm norm}-u_{\rm norm}|^2
++
+|\hat f_{\rm norm}-f_{\rm norm}|^2.
+]
+
+后来加入 FE 物理损失：
+
+[
+\mathcal{L}_{FE,phys}
+=====================
+
+\left|
+\frac{
+\Delta u_{\rm pred}-k^2u_{\rm pred}-f
+}{
+\sigma_f
+}
+\right|^2.
+]
+
+总损失为：
+
+[
+\mathcal{L}_{FE}
+================
+
+\mathcal{L}*{FE,data}
++
+\lambda*{\rm phys}\mathcal{L}_{FE,phys}.
+]
+
+关键缩放关系：
+
+[
+u_{\rm pred}
+============
+
+\sigma_u u_{\rm pred,norm}
++
+\mu_u,
+]
+
+[
+\Delta u_{\rm pred}
+===================
+
+\sigma_u\Delta u_{\rm pred,norm}.
+]
+
+不能把 normalized (u_{\rm pred,norm}) 直接代入 PDE。
+
+当前物理损失训练点与 `probe_coords` 保持一致，即在同一组 `probe_coords` 上同时计算数据损失和 PDE residual。`train_annulus.py` 中已经实现 `compute_trunk_laplacian_basis`、物理版 `fe_loss_fn`、`fe_train_step` 和 `fe_physics_eval_step`。其中 residual 除以 `normalizer.std_f`，使 PDE residual 与归一化 (f) 数据损失处在可比较量级。
+
+---
+
+## 11. FE 物理损失的意义
+
+FE 只用数据损失训练时，可能在函数值上重构较好，但二阶导数质量较差。由于 PDE residual 依赖
+
+[
+\Delta u,
+]
+
+高频误差会被 Laplacian 放大。因此即便
+
+[
+|u_{\rm pred}-u|_{L^2}
+]
+
+不大，
+
+[
+|\Delta u_{\rm pred}-k^2u_{\rm pred}-f|
+]
+
+也可能很大。
+
+加入 FE 物理损失的目标是改善 trunk basis 的导数级表达能力，让 FE 重构场不仅值接近，而且更符合 PDE。
+
+---
+
+## 12. Operator Transformer
+
+Transformer 输入包含三部分：
+
+1. source tokens：
+
+[
+z_f=\mathrm{FE.encode_f}(f_{\rm norm})
+]
+
+并 reshape 为 `seq_chunks` 个 token；
+
+2. boundary tokens：
+
+[
+[x_B,\ y_B,\ g_B],
+]
+
+其中 (g_B=\partial_nP)；
+
+3. 参数 token：
+
+[
+k.
+]
+
+输出是解场 latent：
+
+[
+z_P.
+]
+
+Transformer 训练目标为 latent MSE：
+
+[
+\mathcal{L}_{OL}
+================
+
+|z_{P,\rm pred}-z_{P,\rm target}|^2.
+]
+
+`models_annulus.py` 中 `OperatorTransformer` 将 `f_tokens`、`bc_tokens` 和 `k_values` 嵌入后拼接，加入位置编码，再通过 encoder-only Transformer 输出 `out_dim=n_basis` 的 latent。
+
+`scifm.pdf` 中也明确指出 Transformer 输出的是解的系数 (\psi(\lambda))，训练损失是预测 latent 与 FE 编码得到的目标 latent 之间的 MSE。
+
+---
+
+## 13. (f=0,\ g=\cos\theta) benchmark
+
+用于验证 SNO 的特殊测试问题为：
+
+[
+\Delta P-k^2P=0,
+]
+
+[
+P(r_{\rm outer},\theta)=0,
+]
+
+[
+\partial_nP(r_{\rm inner},\theta)=\cos\theta.
+]
+
+因为几何是圆环、边界激励是单一角向模态 (\cos\theta)，理论解形式为：
+
+[
+P(r,\theta)=R(r)\cos\theta.
+]
+
+径向方程：
+
+[
+R''+\frac{1}{r}R'
+-----------------
+
+\left(
+\frac{1}{r^2}+k^2
+\right)R
+=0.
+]
+
+当 (k>0) 时：
+
+[
+R(r)=A I_1(kr)+B K_1(kr),
+]
+
+其中 (I_1,K_1) 是一阶 modified Bessel functions。
+
+系数由
+
+[
+R(r_{\rm outer})=0,
+]
+
+[
+R'(r_{\rm inner})=-1
+]
+
+确定。
+
+注意第二个条件来自
+
+[
+\partial_nP=-\partial_rP=\cos\theta.
+]
+
+这个理论解可以和 MATLAB 的 `bvp4c/bvp5c` 数值解相互验证。若理论解和 BVP 一致，而 SNO 预测差异较大，通常说明 SNO 对该输入组合的泛化不足，或者 FE 对理论解的值/导数级表示能力不足。
+
+---
+
+## 14. (f=0) 推理时的正确流程
+
+不能直接使用 `sample_batch` 生成的 `boundary_flux`，因为当前 PI-sampler 的 `boundary_flux` 是随机样本诱导出来的，不等于目标 (\cos\theta)。
+
+正确步骤：
+
+1. 构造单样本 batch，只使用其中的 `pod_coords`；
+2. 构造物理空间零源项：
+
+[
+f=0;
+]
+
+3. normalize：
+
+[
+f_{\rm zero,norm}=(0-\mu_f)/\sigma_f;
+]
+
+4. 用 FE 编码：
+
+[
+z_f=\mathrm{FE.encode_f}(f_{\rm zero,norm});
+]
+
+5. 手动构造内边界坐标：
+
+[
+x_B=r_{\rm inner}\cos\theta,
+\qquad
+y_B=r_{\rm inner}\sin\theta;
+]
+
+6. 手动构造目标边界通量：
+
+[
+g_B=\cos\theta;
+]
+
+7. 把 `boundary_coords` 和 `boundary_flux` 写回 `batch_f0`；
+8. 构造 `f_tokens`、`cond_tokens`、`k_values`；
+9. Transformer 预测 (z_P)；
+10. FE trunk 重构并 denormalize 得到物理解 (P)。
+
+这个流程在 `annulus.py` 中已经用于 `sno_f0_pod_prediction_physv2.mat` 的导出。
+
+---
+
+## 15. FE 诊断顺序
+
+如果 (f=0) benchmark 或理论解重构出现问题，应按以下顺序诊断：
+
+### 15.1 理论解与 BVP 数值解互相验证
+
+先确认理论解本身满足：
+
+[
+\Delta P-k^2P=0,
+]
+
+[
+P(r_{\rm outer})=0,
+]
+
+[
+\partial_nP(r_{\rm inner})=\cos\theta.
+]
+
+若理论解与 BVP 一致，则 benchmark 正确。
+
+### 15.2 用 branch net 编码理论解
+
+检查：
+
+[
+P_{\rm exact}
+\rightarrow
+\mathrm{FE.encode_u}
+\rightarrow
+z_{\rm branch}
+\rightarrow
+\mathrm{FE.reconstruct}
+\rightarrow
+P_{\rm rec}.
+]
+
+若误差大，说明 branch net 对理论解编码不好，可能是理论解相对训练分布偏 OOD。
+
+### 15.3 固定 trunk basis，直接最小二乘求最优系数
+
+解：
+
+[
+z^\ast
+======
+
+\arg\min_z
+\left|
+\frac{1}{\sqrt{p}}\Phi z
+------------------------
+
+P_{\rm exact,norm}
+\right|^2.
+]
+
+若 least-squares projection 误差小但 branch 重构误差大，问题主要在 branch encoder；若 least-squares projection 误差也大，说明 trunk basis 表达空间本身不足。
+
+### 15.4 检查 PDE residual
+
+即使值重构误差小，PDE residual 也可能大，因为 Laplacian 会放大高频误差。这正是 FE 加物理损失的原因。
+
+---
+
+## 16. latent-only 物理微调
+
+`scifm.pdf` 中的轻量物理微调思想是：冻结 FE 和 Transformer，只优化 Transformer 输出的解 latent (\psi(\lambda))，优化变量数量为 (O(100)) 量级，并用 PINN-style loss 进一步满足 PDE 和边界条件。
+
+当前问题中优化变量为：
+
+[
+z_P\in\mathbb{R}^{n_{\rm basis}}.
+]
+
+重构为：
+
+[
+P(x;z)
+======
+
+\sigma_u
+\frac{1}{\sqrt{p}}z\cdot\phi(x)
++
+\mu_u.
+]
+
+物理微调 loss：
+
+[
+\mathcal{L}
+===========
+
+w_{eq}|\Delta P-k^2P-f|^2
++
+w_{in}|\partial_nP-g|^2_{\Gamma_{\rm inner}}
++
+w_{out}|P|^2_{\Gamma_{\rm outer}}
++
+w_{reg}|z-z_0|^2.
+]
+
+其中：
+
+* (z_0) 是 Transformer zero-shot 输出；
+* (g=\cos\theta) 用于 (f=0) benchmark；
+* 内边界法向必须用 (n=-e_r)；
+* 外边界 loss 不能省略，因为 FE 重构不是 hard-enforced Dirichlet。
+
+---
+
+## 17. 动态采样物理微调
+
+固定 collocation 点可能导致 latent-only 微调过拟合固定点。更合理的做法是动态采样。
+
+推荐做法：
+
+* 每 `resample_every` 步重新生成训练点；
+* 内部点从环域中采样；
+* 边界点从内/外边界角向采样；
+* 用当前 residual 和梯度大小选 harder points；
+* 同时保留一部分随机点，避免只关注局部极端点。
+
+内部点 hard score 可取：
+
+[
+S_\Omega(x)
+===========
+
+\frac{|r_{eq}(x)|}{\overline{|r_{eq}|}+\epsilon}
++
+\alpha
+\frac{|\nabla P(x)|}{\overline{|\nabla P|}+\epsilon}.
+]
+
+边界 score：
+
+[
+S_{\rm inner}=|\partial_nP-g|,
+]
+
+[
+S_{\rm outer}=|P|.
+]
+
+不建议第一版使用 (\nabla r_{eq}) 作为 score，因为它需要三阶导数，计算代价很高，容易 OOM。
+
+---
+
+## 18. 当前重要配置
+
+当前常用配置：
+
+```python
+cfg.r_inner = 0.2
+cfg.r_outer = 1.0
+
+cfg.k_min = 1.0
+cfg.k_max = 1.0
+
+cfg.n_basis = 512
+cfg.theta_size = 128
+cfg.radial_size = 32
+cfg.random_probe_points = 1024
+
+cfg.sigma_list = (3.0, 5.0, 7.0)
+cfg.num_repeats = 3
+cfg.sample_size = 256
+
+cfg.trunk_width = 512
+cfg.trunk_depth = 5
+cfg.cnn_dense_width = 1024
+
+cfg.transformer_dim = 512
+cfg.transformer_heads = 8
+cfg.transformer_layers = 4
+cfg.transformer_mlp_dim = 1024
+
+cfg.seq_chunks = 32
+cfg.cond_chunks = 32
+```
+
+`AnnulusConfig` 中记录了几何、PDE 参数、PI-sampler prior、采样网格、CNN branch、Transformer 和训练配置。当前文件中 `fe_phys_weight` 已加入 FE 物理损失权重。
+
+加载已训练模型时，config 必须和训练时一致，尤其是：
+
+* `r_inner`, `r_outer`
+* `n_basis`
+* `theta_size`, `radial_size`
+* `random_probe_points`
+* `trunk_width`, `trunk_depth`
+* `cnn_dense_width`
+* `transformer_dim`, `transformer_layers`
+* `seq_chunks`, `cond_chunks`
+* `k_min`, `k_max`
+* normalizer 路径和 `run_name`
+
+否则会出现参数 shape 不匹配，或者模型虽然可加载但推理分布错误。
+
+---
+
+## 19. 当前主要文件角色
+
+当前相关文件：
+
+* `config_annulus.py`：固定环域 SNO 配置；
+* `data_annulus.py`：PI-sampler、环域网格、probe 点、BNN prior、边界通量、normalizer、token 构造；
+* `models_annulus.py`：CNN branch、shared trunk、FunctionEncoder、OperatorTransformer；
+* `train_annulus.py`：FE 训练、FE 物理损失、Transformer 训练、保存/加载、评估函数；
+* `annulus.py`：Jupyter 工作流整合，包括 FE 训练、OL 训练、随机样本导出、(f=0) 推理、latent-only 微调、MATLAB 导出等。
+
+---
+
+## 20. 当前方案核心结论
+
+当前规则环域问题已经形成较清晰的正确路线：
+
+[
+P=(r-r_{\rm outer})P_{\rm BNN}
+]
+
+只强制外边界 Dirichlet 条件；
+
+[
+g(\theta)=\partial_nP|*{\Gamma*{\rm inner}}
+]
+
+由每个样本自动诱导，并作为 Transformer 的条件输入。
+
+因此当前 SNO 学习的是：
+
+[
+(f,\partial_nP|*{\Gamma*{\rm inner}},k)\mapsto P
+]
+
+这一真正的边界条件参数化算子，而不是固定单一边界条件下的场回归。
+
+FE 使用 CNN branch + shared trunk 学习 (P) 和 (f) 的连续表示；Transformer 在 latent space 中从 (z_f)、边界 token 和 (k) 预测 (z_P)。FE 训练中加入 PDE residual 有助于提升 trunk basis 的导数级表达能力。对于特定测试如
+
+[
+f=0,\quad g=\cos\theta
+]
+
+若 zero-shot 仍有偏差，可冻结网络，仅对 (z_P) 做 latent-only physics finetuning。

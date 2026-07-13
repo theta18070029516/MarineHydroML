@@ -1,0 +1,28 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Training artefacts, checkpoints, and generated experiment outputs
+**/out/
+**/out_*/
+*.msgpack
+*.npy
+*.npz
+*.mat
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# Local editor and operating-system files
+*.asv
+.DS_Store
+Thumbs.db
+~$*
+*.log

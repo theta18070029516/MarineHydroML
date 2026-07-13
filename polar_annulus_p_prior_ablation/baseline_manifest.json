@@ -1,0 +1,73 @@
+{
+  "manifest_version": 1,
+  "snapshot_date": "2026-07-13",
+  "snapshot_policy": "source_only_no_checkpoints_outputs_or_pycache",
+  "reference_projects": {
+    "polar_q_prior": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code",
+    "cartesian_p_prior": "D:\\A4S\\海洋工程动水力-机器学习\\annulus_sno"
+  },
+  "copied_source_files": [
+    {
+      "source": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code\\config_polar.py",
+      "snapshot_name": "config_polar.py",
+      "source_sha256": "FB160CB173A9BC81543ACF99F2B28A1341FD51F90B13168CE90D422CE68973BA"
+    },
+    {
+      "source": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code\\data_polar.py",
+      "snapshot_name": "data_polar.py",
+      "source_sha256": "8F855595E88611F7DA2386071EDBBDD052D1A996554A8A516E4E939940DF67AA"
+    },
+    {
+      "source": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code\\models_polar.py",
+      "snapshot_name": "models_polar.py",
+      "source_sha256": "6C9CF5A37F0BE37495C4652D5228730478FBA82289CC7F1AB5AD83092DA8E787"
+    },
+    {
+      "source": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code\\train_polar.py",
+      "snapshot_name": "train_polar.py",
+      "source_sha256": "1FB35EA27C9BC36CEF8D3FB33141E8E7598D41EE3A3FE24539CA13650B739828"
+    },
+    {
+      "source": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code\\exact_solution.py",
+      "snapshot_name": "exact_solution.py",
+      "source_sha256": "7F70AFEC2694DA9FFF3ADFF1C2DDB5BEE27E1B98DC37B8908642708C62EDBB53"
+    },
+    {
+      "source": "D:\\A4S\\海洋工程动水力-机器学习\\polar_annulus_sno_code\\requirements.txt",
+      "snapshot_name": "requirements.txt",
+      "source_sha256": "0DA839655F036668C65A229D84560BF9ECB258515A94FF036B1A64728CF9DAFC"
+    }
+  ],
+  "polar_v2_baseline": {
+    "r_inner": 0.2,
+    "r_outer": 1.0,
+    "k_min": 1.0,
+    "k_max": 1.0,
+    "prior_scale_pairs": [[1.0, 1.0], [1.5, 3.0], [2.0, 5.0]],
+    "repeats_per_scale": 1,
+    "sample_size": 128,
+    "effective_batch_size": 384,
+    "hidden_bnn": 256,
+    "theta_size": 128,
+    "radial_size": 32,
+    "random_probe_points": 1024,
+    "normalizer_batches": 100,
+    "n_basis": 512,
+    "trunk_width": 512,
+    "trunk_depth": 5,
+    "cnn_channels": [32, 64, 128],
+    "cnn_kernel_size": [3, 5],
+    "cnn_stride": [1, 2],
+    "cnn_dense_width": 1024,
+    "transformer_dim": 512,
+    "transformer_heads": 8,
+    "transformer_layers": 4,
+    "transformer_mlp_dim": 2048,
+    "seq_chunks": 32,
+    "cond_chunks": 32,
+    "fe_phys_weight": 0.0,
+    "fe_steps": 500000,
+    "ol_steps": 500000,
+    "seed": 0
+  }
+}
