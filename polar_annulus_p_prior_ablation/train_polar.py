@@ -1015,6 +1015,7 @@ def train_fe(
             progress.set_postfix(
                 loss=f"{record['loss']:.3e}",
                 p_rl2=f"{record['eval_p_relative_l2']:.3e}",
+                f_rl2=f"{record['eval_f_relative_l2']:.3e}",
                 refresh=False,
             )
 
