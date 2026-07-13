@@ -38,8 +38,8 @@ class PolarAnnulusConfig:
         (1.0, 1.0),
         (1.5, 2.0),
     )
-    repeats_per_scale: int = 1
-    sample_size: int = 256
+    repeats_per_scale: int = 4
+    sample_size: int = 64
     hidden_bnn: int = 256
     bnn_bias_sigma: float = 1.0
     bnn_output_sigma: float = 1.0
