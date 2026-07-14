@@ -34,7 +34,7 @@ f=0,
 \[
 \widehat\theta=\frac{\theta}{\pi}-1,
 \qquad
-\widehat r=\frac{2(r-r_{\rm in})}{r_{\rm out}-r_{\rm in}}-1,
+\widehat r=\frac{2(r-r_{\mathrm{in}})}{r_{\mathrm{out}}-r_{\mathrm{in}}}-1,
 \]
 
 所以计算域映射到 `[-1,1]^2`。
@@ -68,7 +68,7 @@ q=\sqrt{\frac2H}\sum_{j=1}^H a_j
 压力由外边界向内解析积分：
 
 \[
-P(r,\theta)=\int_{r_{\rm out}}^r q(s,\theta)\,ds.
+P(r,\theta)=\int_{r_{\mathrm{out}}}^r q(s,\theta)\,ds.
 \]
 
 代码使用稳定差商
@@ -77,7 +77,7 @@ P(r,\theta)=\int_{r_{\rm out}}^r q(s,\theta)\,ds.
 \frac{\sin(A+w\widehat r)-\sin(A+w)}{w}
 =(\widehat r-1)
 \cos\!\left(A+\frac{w(\widehat r+1)}2\right)
-\operatorname{sinc}\!\left(\frac{w(\widehat r-1)}2\right),
+\mathrm{sinc}\!\left(\frac{w(\widehat r-1)}2\right),
 \]
 
 因此 `w_r=0` 或非常小时自动取到正确极限，不需要除零分支。
@@ -91,7 +91,7 @@ f=q_r+\frac qr+\frac1{r^2}P_{\theta\theta}-k^2P.
 训练边界通量为
 
 \[
-g_n=-q(r_{\rm in},\theta).
+g_n=-q(r_{\mathrm{in}},\theta).
 \]
 
 ## 3. Function Encoder
@@ -111,7 +111,7 @@ g_n=-q(r_{\rm in},\theta).
 为保证解码后物理零边界不被均值平移破坏，`P` 使用 scale-only normalization：
 
 \[
-P_{\rm norm}=P/\operatorname{RMS}(P),
+P_{\mathrm{norm}}=P/\mathrm{RMS}(P),
 \]
 
 即 `mean_p` 固定为零；`f` 仍使用普通均值/标准差归一化。
@@ -121,7 +121,7 @@ P_{\rm norm}=P/\operatorname{RMS}(P),
 trunk 对归一化坐标求导后，代码显式加入尺度因子：
 
 \[
-\partial_r=\frac{2}{r_{\rm out}-r_{\rm in}}\partial_{\widehat r},
+\partial_r=\frac{2}{r_{\mathrm{out}}-r_{\mathrm{in}}}\partial_{\widehat r},
 \qquad
 \partial_\theta=\frac1\pi\partial_{\widehat\theta}.
 \]

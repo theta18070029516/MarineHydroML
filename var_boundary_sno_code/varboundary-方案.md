@@ -133,14 +133,14 @@ $$
 
 $$
 \mathcal L_{\mathrm{data}}=
-\operatorname{MSE}(\hat P,P)+\operatorname{MSE}(\hat f,f).
+\mathrm{MSE}(\hat P,P)+\mathrm{MSE}(\hat f,f).
 $$
 
 代码已实现 `physical_residual_loss`，其正确做法是在物理坐标上计算
 
 $$
 \mathcal L_{\mathrm{phys}}=
-\operatorname{MSE}\!\left(
+\mathrm{MSE}\!\left(
 \frac{\Delta_{x,y}\hat P-k^2\hat P-f}{\sigma_f}
 \right),
 $$
@@ -203,7 +203,7 @@ $$
 |---|---|
 |标准域|`canonical_r_inner=0.2`，`canonical_r_outer=1.0`|
 |几何|`geom_base=0.12`，`geom_amp=0.08`，`outer_scale=5.0`|
-|参数|`k=1.0`（`k_min=k_max=1.0`）|
+|参数范围|`k_min=0.2`，`k_max=2.0`|
 |离散|`theta_size=128`，`radial_size=32`，`random_probe_points=1024`|
 |latent|`n_basis=512`|
 |训练|`fe_steps=300000`，`ol_steps=200000`|
