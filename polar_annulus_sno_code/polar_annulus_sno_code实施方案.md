@@ -36,11 +36,11 @@ $$
 
 预测场已恢复解析解的主导 $\cos{\theta}$ 空间结构，笛卡尔视图、极坐标视图和剖面曲线均与解析解保持一致趋势。外边界条件由网络结构精确满足；剩余误差主要体现为局部场偏差及内边界通量误差，后者是下一阶段可重点优化的指标。
 
-![SNO 与解析解的笛卡尔/极坐标对比](out_polar_annulus_sno/polar_v3/sno_exact_evaluation/sno_vs_exact_k_1.png)
+![SNO 与解析解的笛卡尔/极坐标对比](docs\images\sno_vs_exact_k_1.png)
 
 典型径向与角向剖面（实线为 SNO，虚线为解析解）：
 
-![典型径向与角向剖面](out_polar_annulus_sno/polar_v3/sno_exact_evaluation/sno_vs_exact_k_1_profiles.png)
+![典型径向与角向剖面](docs\images\sno_vs_exact_k_1_profiles.png)
 
 ## 可复现入口
 
