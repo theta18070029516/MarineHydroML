@@ -183,21 +183,38 @@ def _physics_preflight(config) -> dict:
 
 def _rms_preflight(config) -> list[dict]:
     rms_config = replace(config, pressure_prior_scaling="boundary_rms")
-    key = jax.random.PRNGKey(91_177)
     boundary = inner_boundary_coords(config)
+    total_samples = 2_048
+    chunk_size = 256
     records = []
     for sigma_theta, sigma_r in config.prior_scale_pairs:
-        key, params_key = jax.random.split(key)
-        params = sample_bnn_params(
-            params_key, 256, sigma_theta, sigma_r, config
+        # Use a scale-derived key so inserting or reordering scale pairs does
+        # not change the diagnostic sample for an existing pair.
+        scale_tag = (
+            (int(round(sigma_theta * 1_000.0)) << 16)
+            ^ int(round(sigma_r * 1_000.0))
         )
-        k_values = jnp.full((256,), config.k_min, dtype=jnp.float32)
-        p_flux = -evaluate_polar_prior(
-            params, boundary, k_values, sigma_r, rms_config
-        ).q
-        q_flux = evaluate_direct_q_prior_flux(params, boundary)
-        p_rms = float(jnp.sqrt(jnp.mean(p_flux**2)))
-        q_rms = float(jnp.sqrt(jnp.mean(q_flux**2)))
+        scale_key = jax.random.fold_in(jax.random.PRNGKey(91_177), scale_tag)
+        p_sum_sq = 0.0
+        q_sum_sq = 0.0
+        value_count = 0
+        for chunk_index in range(total_samples // chunk_size):
+            params_key = jax.random.fold_in(scale_key, chunk_index)
+            params = sample_bnn_params(
+                params_key, chunk_size, sigma_theta, sigma_r, config
+            )
+            k_values = jnp.full(
+                (chunk_size,), config.k_min, dtype=jnp.float32
+            )
+            p_flux = -evaluate_polar_prior(
+                params, boundary, k_values, sigma_r, rms_config
+            ).q
+            q_flux = evaluate_direct_q_prior_flux(params, boundary)
+            p_sum_sq += float(jnp.sum(p_flux**2))
+            q_sum_sq += float(jnp.sum(q_flux**2))
+            value_count += p_flux.size
+        p_rms = (p_sum_sq / value_count) ** 0.5
+        q_rms = (q_sum_sq / value_count) ** 0.5
         mismatch = abs(p_rms / q_rms - 1.0)
         records.append(
             {
@@ -207,6 +224,8 @@ def _rms_preflight(config) -> list[dict]:
                 "p_prior_flux_rms": p_rms,
                 "q_prior_flux_rms": q_rms,
                 "relative_mismatch": mismatch,
+                "diagnostic_samples": total_samples,
+                "chunk_size": chunk_size,
             }
         )
     return records
@@ -224,10 +243,11 @@ def _model_and_resume_preflight(config) -> dict:
         fe_state, batch, normalizer, smoke
     )
     ol_state, _ = create_ol_state(smoke, key_init_ol)
-    ol_state, ol_loss = ol_train_step(
+    ol_state, ol_loss, ol_prediction = ol_train_step(
         ol_state, f_tokens, boundary_tokens, batch.k_values, target_latent
     )
     jax.block_until_ready(ol_loss)
+    jax.block_until_ready(ol_prediction)
 
     outer = outer_boundary_coords(smoke)
     decoded_outer = fe_state.apply_fn(

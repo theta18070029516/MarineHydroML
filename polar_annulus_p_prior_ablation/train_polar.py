@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 import csv
+import gc
 import json
 import time
 from dataclasses import replace
@@ -19,6 +21,7 @@ from tqdm.auto import trange
 from config_polar import PolarAnnulusConfig
 from data_polar import (
     FieldNormalizer,
+    OperatorBatch,
     SampleBatch,
     build_field_normalizer_online,
     denormalize_f,
@@ -33,7 +36,9 @@ from data_polar import (
     normalize_p,
     r_from_hat,
     sample_batch,
+    sample_operator_batch,
 )
+from exact_solution import exact_annulus_solution
 from models_polar import FunctionEncoder, OperatorTransformer
 
 
@@ -169,6 +174,43 @@ def load_normalizer(out_dir: Path) -> FieldNormalizer:
     )
 
 
+def load_fe_inference_state(
+    config: PolarAnnulusConfig,
+) -> tuple[SimpleNamespace, FieldNormalizer]:
+    """Load FE parameters without constructing its 534 MiB Adam state."""
+    final_path = config.output_dir / "fe_params.msgpack"
+    checkpoint_path = config.output_dir / "fe_checkpoint_latest.msgpack"
+
+    if checkpoint_path.exists():
+        payload = serialization.msgpack_restore(checkpoint_path.read_bytes())
+        if payload["format_version"] != CHECKPOINT_FORMAT_VERSION:
+            raise ValueError("Unsupported FE checkpoint format version.")
+        if payload["stage"] != "fe":
+            raise ValueError("Expected an FE checkpoint.")
+        if payload["config_fingerprint"] != config.fingerprint():
+            raise ValueError(
+                "FE checkpoint/config fingerprint mismatch; refusing to load."
+            )
+        raw_params = payload["state"]["params"]
+        del payload
+    elif final_path.exists():
+        raw_params = serialization.msgpack_restore(final_path.read_bytes())
+    else:
+        raise FileNotFoundError(
+            f"Neither {final_path.name} nor {checkpoint_path.name} exists in "
+            f"{config.output_dir}."
+        )
+
+    params = jax.device_put(raw_params)
+    jax.tree_util.tree_map(lambda value: value.block_until_ready(), params)
+    del raw_params
+    gc.collect()
+
+    model = FunctionEncoder(config)
+    inference_state = SimpleNamespace(params=params, apply_fn=model.apply)
+    return inference_state, load_normalizer(config.output_dir)
+
+
 FE_HISTORY_COLUMNS = (
     "step",
     "samples_seen",
@@ -186,10 +228,9 @@ FE_HISTORY_COLUMNS = (
 OPERATOR_HISTORY_COLUMNS = (
     "step",
     "samples_seen",
-    "train_latent_mse",
-    "eval_latent_mse",
-    "eval_latent_relative_l2",
-    "eval_physical_relative_l2",
+    "loss",
+    "in_distribution_relative_l2",
+    "exact_relative_l2",
     "elapsed_seconds",
 )
 
@@ -494,41 +535,54 @@ def fe_eval_step(
     )
 
 
-def ol_loss_fn(
-    params: Any,
-    state: TrainState,
-    f_tokens: Array,
-    boundary_tokens: Array,
-    k_values: Array,
-    target_latent_p: Array,
-) -> Array:
-    pred_latent_p = state.apply_fn(
-        {"params": params},
-        f_tokens,
-        boundary_tokens,
-        k_values,
-    )
-    return jnp.mean((pred_latent_p - target_latent_p) ** 2)
-
-
-@jax.jit
+@partial(jax.jit, donate_argnums=(0,))
 def ol_train_step(
     state: TrainState,
     f_tokens: Array,
     boundary_tokens: Array,
     k_values: Array,
     target_latent_p: Array,
-) -> tuple[TrainState, Array]:
-    loss, gradients = jax.value_and_grad(ol_loss_fn)(
-        state.params,
-        state,
-        f_tokens,
-        boundary_tokens,
-        k_values,
-        target_latent_p,
+) -> tuple[TrainState, Array, Array]:
+    """Update OL once and return the prediction already used by the loss."""
+
+    def loss_with_prediction(params):
+        pred_latent_p = state.apply_fn(
+            {"params": params},
+            f_tokens,
+            boundary_tokens,
+            k_values,
+        )
+        loss = jnp.mean((pred_latent_p - target_latent_p) ** 2)
+        return loss, pred_latent_p
+
+    (loss, pred_latent_p), gradients = jax.value_and_grad(
+        loss_with_prediction,
+        has_aux=True,
+    )(
+        state.params
     )
     state = state.apply_gradients(grads=gradients)
-    return state, loss
+    return state, loss, pred_latent_p
+
+
+@partial(jax.jit, static_argnames=("fe_apply_fn",))
+def pressure_relative_l2_from_latent(
+    fe_params: Any,
+    fe_apply_fn: Any,
+    pred_latent_p: Array,
+    pod_coords: Array,
+    target_p_pod: Array,
+    normalizer: FieldNormalizer,
+) -> Array:
+    """Decode a prediction and score it on the current OL training batch."""
+    pred_p_norm = fe_apply_fn(
+        {"params": fe_params},
+        pred_latent_p,
+        pod_coords,
+        method=FunctionEncoder.reconstruct_p,
+    )
+    pred_p = denormalize_p(pred_p_norm, normalizer)
+    return jnp.mean(relative_l2(pred_p, target_p_pod))
 
 
 @partial(jax.jit, static_argnames=("ol_apply_fn", "fe_apply_fn"))
@@ -581,8 +635,8 @@ def ol_eval_step(
 
 
 def encode_operator_batch(
-    fe_state: TrainState,
-    batch: SampleBatch,
+    fe_state: Any,
+    batch: SampleBatch | OperatorBatch,
     normalizer: FieldNormalizer,
     config: PolarAnnulusConfig,
 ) -> tuple[Array, Array, Array]:
@@ -758,7 +812,7 @@ def _legacy_train_operator_parameter_only(
             normalizer,
             config,
         )
-        state, train_loss = ol_train_step(
+        state, train_loss, _ = ol_train_step(
             state,
             f_tokens,
             boundary_tokens,
@@ -809,31 +863,25 @@ def _legacy_train_operator_parameter_only(
             record = {
                 "step": step,
                 "samples_seen": step * config.effective_batch_size,
-                "train_latent_mse": train_loss_value,
-                "eval_latent_mse": float(eval_metrics["latent_mse"]),
-                "eval_latent_relative_l2": float(
-                    eval_metrics["latent_relative_l2"]
-                ),
-                "eval_physical_relative_l2": float(
+                "loss": train_loss_value,
+                "in_distribution_relative_l2": float(
                     eval_metrics["physical_relative_l2"]
                 ),
+                "exact_relative_l2": float("nan"),
                 "elapsed_seconds": float(time.perf_counter() - start_time),
             }
             history.append(record)
             save_operator_history(history, output_dir)
 
             progress.set_postfix(
-                loss=f"{record['train_latent_mse']:.3e}",
-                z_rl2=f"{record['eval_latent_relative_l2']:.3e}",
-                p_rl2=f"{record['eval_physical_relative_l2']:.3e}",
+                loss=f"{record['loss']:.3e}",
+                p_rl2=f"{record['in_distribution_relative_l2']:.3e}",
                 refresh=False,
             )
             progress.write(
                 f"[OL {step:07d}] "
-                f"train_MSE={record['train_latent_mse']:.4e} "
-                f"eval_MSE={record['eval_latent_mse']:.4e} "
-                f"RL2(z_P)={record['eval_latent_relative_l2']:.4e} "
-                f"RL2(P@probe)={record['eval_physical_relative_l2']:.4e}"
+                f"loss={record['loss']:.4e} "
+                f"RL2(P)={record['in_distribution_relative_l2']:.4e}"
             )
             del (
                 eval_batch,
@@ -926,6 +974,76 @@ def predict_zero_source_cosine_flux(
         "boundary_flux": boundary_flux,
         "k_values": k_values,
         "pred_latent_p": pred_latent_p,
+    }
+
+
+def build_exact_solution_benchmark(
+    config: PolarAnnulusConfig,
+) -> dict[str, Array | float]:
+    """Precompute the fixed f=0, g_n=cos(theta), k=1 exact benchmark."""
+    k_value = 1.0
+    if not config.k_min <= k_value <= config.k_max:
+        raise ValueError("The exact online benchmark requires k=1 in the training range.")
+
+    coords_hat = make_polar_grid(config)
+    radius = r_from_hat(coords_hat[:, 1], config)
+    theta = jnp.pi * (coords_hat[:, 0] + 1.0)
+    p_exact_np = exact_annulus_solution(
+        np.asarray(jax.device_get(radius)),
+        np.asarray(jax.device_get(theta)),
+        k_value,
+        config.r_inner,
+        config.r_outer,
+        flux_amplitude=1.0,
+    )
+    p_exact = jnp.asarray(p_exact_np[None, :], dtype=jnp.float32)
+
+    # The grid is flattened in [Nr, Nt] order. The periodic theta weights are
+    # constant and cancel from relative L2. Use trapezoidal radial weights and
+    # the polar area Jacobian r.
+    radial_endpoint_weight = jnp.where(
+        jnp.isclose(jnp.abs(coords_hat[:, 1]), 1.0),
+        0.5,
+        1.0,
+    )
+    area_weights = radius * radial_endpoint_weight
+    return {
+        "coords_hat": coords_hat,
+        "p_exact": p_exact,
+        "area_weights": area_weights,
+        "k_value": k_value,
+    }
+
+
+def evaluate_exact_solution_benchmark(
+    config: PolarAnnulusConfig,
+    fe_state: TrainState,
+    ol_state: TrainState,
+    normalizer: FieldNormalizer,
+    benchmark: dict[str, Array | float],
+) -> dict[str, Array]:
+    """Evaluate deterministic SNO pressure errors against the analytic solution."""
+    prediction = predict_zero_source_cosine_flux(
+        config,
+        fe_state,
+        ol_state,
+        normalizer,
+        float(benchmark["k_value"]),
+    )
+    p_pred = prediction["p_pred"]
+    p_exact = benchmark["p_exact"]
+    area_weights = benchmark["area_weights"][None, :]
+    error = p_pred - p_exact
+    grid_relative_l2 = jnp.linalg.norm(error) / jnp.maximum(
+        jnp.linalg.norm(p_exact), 1.0e-12
+    )
+    area_relative_l2 = jnp.sqrt(
+        jnp.sum(area_weights * error**2)
+        / jnp.maximum(jnp.sum(area_weights * p_exact**2), 1.0e-12)
+    )
+    return {
+        "grid_relative_l2": grid_relative_l2,
+        "area_weighted_relative_l2": area_relative_l2,
     }
 
 
@@ -1039,11 +1157,11 @@ def train_fe(
 
 def train_operator(
     config: PolarAnnulusConfig,
-    fe_state: TrainState,
+    fe_state: Any,
     normalizer: FieldNormalizer,
     resume: bool = False,
 ) -> TrainState:
-    """Train the latent operator with lossless scheduled checkpoint resume."""
+    """Low-memory OL training with current-batch and exact-solution monitoring."""
     config.save_json()
     output_dir = config.output_dir
     master_key = jax.random.PRNGKey(config.seed + 10_000)
@@ -1061,6 +1179,11 @@ def train_operator(
             for record in _load_history(output_dir / "operator_training_history.csv")
             if int(record["step"]) <= start_step
         ]
+        if history and set(history[-1]) != set(OPERATOR_HISTORY_COLUMNS):
+            raise ValueError(
+                "The existing OL history uses the older evaluation schema. "
+                "Use a new run_name for the low-memory OL run."
+            )
         print(f"[OL resume] completed_steps={start_step}")
     else:
         start_step = 0
@@ -1070,12 +1193,11 @@ def train_operator(
     if start_step > config.ol_steps:
         raise ValueError("OL checkpoint step exceeds configured ol_steps.")
 
-    eval_probe_points = min(config.random_probe_points, config.ol_eval_probe_points)
-    eval_config = replace(
-        config,
-        sample_size=min(config.sample_size, config.ol_eval_sample_size),
-        random_probe_points=eval_probe_points,
-        fe_physics_points=min(config.fe_physics_points, eval_probe_points),
+    exact_benchmark = build_exact_solution_benchmark(config)
+    print(
+        "[OL monitor] every "
+        f"{config.ol_log_interval} steps: loss, current-batch RL2(P), "
+        "exact RL2(P)."
     )
     start_time = time.perf_counter()
     progress = trange(
@@ -1088,11 +1210,11 @@ def train_operator(
     for step_index in progress:
         completed_step = step_index + 1
         key_train, batch_key = jax.random.split(key_train)
-        train_batch = sample_batch(batch_key, config)
+        train_batch = sample_operator_batch(batch_key, config)
         f_tokens, boundary_tokens, target_latent_p = encode_operator_batch(
             fe_state, train_batch, normalizer, config
         )
-        state, train_loss = ol_train_step(
+        state, train_loss, train_pred_latent_p = ol_train_step(
             state,
             f_tokens,
             boundary_tokens,
@@ -1101,52 +1223,61 @@ def train_operator(
         )
 
         should_log = (
-            completed_step == 1
-            or completed_step % config.ol_log_interval == 0
+            completed_step % config.ol_log_interval == 0
             or completed_step == config.ol_steps
         )
         if should_log:
-            train_loss_value = float(train_loss)
-            key_eval, eval_batch_key = jax.random.split(key_eval)
-            eval_batch = sample_batch(eval_batch_key, eval_config)
-            eval_f_tokens, eval_boundary_tokens, eval_target_latent_p = (
-                encode_operator_batch(fe_state, eval_batch, normalizer, eval_config)
-            )
-            eval_metrics = ol_eval_step(
-                state.params,
-                state.apply_fn,
+            in_distribution_error = pressure_relative_l2_from_latent(
                 fe_state.params,
                 fe_state.apply_fn,
-                eval_f_tokens,
-                eval_boundary_tokens,
-                eval_batch.k_values,
-                eval_target_latent_p,
-                eval_batch.probe_coords,
-                eval_batch.p_probe,
+                train_pred_latent_p,
+                train_batch.pod_coords,
+                train_batch.p_pod,
                 normalizer,
             )
-            jax.block_until_ready(eval_metrics["physical_relative_l2"])
+            exact_metrics = evaluate_exact_solution_benchmark(
+                config,
+                fe_state,
+                state,
+                normalizer,
+                exact_benchmark,
+            )
+            train_loss_value = float(train_loss)
+            in_distribution_value = float(in_distribution_error)
+            exact_value = float(exact_metrics["area_weighted_relative_l2"])
             elapsed = elapsed_offset + time.perf_counter() - start_time
             record = {
                 "step": completed_step,
                 "samples_seen": completed_step * config.effective_batch_size,
-                "train_latent_mse": train_loss_value,
-                "eval_latent_mse": float(eval_metrics["latent_mse"]),
-                "eval_latent_relative_l2": float(
-                    eval_metrics["latent_relative_l2"]
-                ),
-                "eval_physical_relative_l2": float(
-                    eval_metrics["physical_relative_l2"]
-                ),
+                "loss": train_loss_value,
+                "in_distribution_relative_l2": in_distribution_value,
+                "exact_relative_l2": exact_value,
                 "elapsed_seconds": float(elapsed),
             }
             history.append(record)
             save_operator_history(history, output_dir)
             progress.set_postfix(
-                loss=f"{record['train_latent_mse']:.3e}",
-                p_rl2=f"{record['eval_physical_relative_l2']:.3e}",
-                refresh=False,
+                loss=f"{record['loss']:.3e}",
+                in_l2=f"{record['in_distribution_relative_l2']:.3e}",
+                exact_l2=f"{record['exact_relative_l2']:.3e}",
+                refresh=True,
             )
+            progress.write(
+                f"[OL {completed_step:07d}] "
+                f"loss={record['loss']:.4e} "
+                f"in_dist_RL2(P)={record['in_distribution_relative_l2']:.4e} "
+                f"exact_RL2(P)={record['exact_relative_l2']:.4e} "
+                f"elapsed={record['elapsed_seconds']:.1f}s"
+            )
+
+        del (
+            train_batch,
+            f_tokens,
+            boundary_tokens,
+            target_latent_p,
+            train_pred_latent_p,
+            train_loss,
+        )
 
         if (
             completed_step % config.checkpoint_interval == 0

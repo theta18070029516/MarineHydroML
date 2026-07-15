@@ -47,6 +47,22 @@ class SampleBatch(NamedTuple):
     k_values: Array         # [B]
 
 
+class OperatorBatch(NamedTuple):
+    """Minimal batch needed by operator learning.
+
+    OL is trained entirely from fields on the regular POD grid.  Random probe
+    fields are intentionally omitted because they are not part of the OL loss
+    and were a large, short-lived GPU allocation at every step.
+    """
+
+    boundary_coords: Array  # [B, Nt, 2]
+    boundary_flux: Array    # [B, Nt]
+    pod_coords: Array       # [Npod, 2]
+    p_pod: Array            # [B, Npod]
+    f_pod: Array            # [B, Npod]
+    k_values: Array         # [B]
+
+
 class FieldNormalizer(NamedTuple):
     mean_p: Array
     std_p: Array
@@ -379,6 +395,89 @@ def sample_batch(key: Array, config: PolarAnnulusConfig) -> SampleBatch:
     )
 
 
+def sample_operator_batch(
+    key: Array,
+    config: PolarAnnulusConfig,
+) -> OperatorBatch:
+    """Generate only the fields required for one OL optimization step.
+
+    The unused first split preserves the original OL parameter-sampling random
+    stream while avoiding construction of random probe coordinates and fields.
+    """
+    _, key_groups = jax.random.split(key)
+    pod_coords = make_polar_grid(config)
+    boundary_coords_single = inner_boundary_coords(config)
+
+    group_specs: list[tuple[float, float]] = []
+    for scale_pair in config.prior_scale_pairs:
+        group_specs.extend([scale_pair] * config.repeats_per_scale)
+
+    group_keys = jax.random.split(key_groups, len(group_specs))
+    p_pod_list = []
+    f_pod_list = []
+    k_list = []
+    flux_list = []
+
+    for group_key, (sigma_theta, sigma_r) in zip(group_keys, group_specs):
+        key_params, key_k = jax.random.split(group_key)
+        params = sample_bnn_params(
+            key_params,
+            config.sample_size,
+            sigma_theta,
+            sigma_r,
+            config,
+        )
+        if config.k_max == config.k_min:
+            k_values = jnp.full(
+                (config.sample_size,),
+                config.k_min,
+                dtype=jnp.float32,
+            )
+        else:
+            k_values = jax.random.uniform(
+                key_k,
+                (config.sample_size,),
+                minval=config.k_min,
+                maxval=config.k_max,
+            )
+
+        pod_eval = evaluate_polar_prior(
+            params,
+            pod_coords,
+            k_values,
+            sigma_r,
+            config,
+        )
+        boundary_eval = evaluate_polar_prior(
+            params,
+            boundary_coords_single,
+            k_values,
+            sigma_r,
+            config,
+        )
+        p_pod_list.append(pod_eval.p)
+        f_pod_list.append(pod_eval.f)
+        k_list.append(k_values)
+        flux_list.append(-boundary_eval.q)
+
+    p_pod = jnp.concatenate(p_pod_list, axis=0)
+    f_pod = jnp.concatenate(f_pod_list, axis=0)
+    k_values = jnp.concatenate(k_list, axis=0)
+    boundary_flux = jnp.concatenate(flux_list, axis=0)
+    boundary_coords = jnp.broadcast_to(
+        boundary_coords_single[None, :, :],
+        (config.effective_batch_size, config.theta_size, 2),
+    )
+    return OperatorBatch(
+        boundary_coords=boundary_coords,
+        boundary_flux=boundary_flux,
+        pod_coords=pod_coords,
+        p_pod=p_pod,
+        f_pod=f_pod,
+        k_values=k_values,
+    )
+
+
 def normalize_p(p: Array, normalizer: FieldNormalizer) -> Array:
     return (p - normalizer.mean_p) / normalizer.std_p
 
@@ -607,7 +706,7 @@ def make_condition_tokens_from_arrays(
 
 
 def make_condition_tokens(
-    batch: SampleBatch,
+    batch: SampleBatch | OperatorBatch,
     config: PolarAnnulusConfig,
 ) -> Array:
     return make_condition_tokens_from_arrays(

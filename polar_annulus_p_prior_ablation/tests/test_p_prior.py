@@ -8,7 +8,6 @@ import numpy as np
 
 from config_polar import PolarAnnulusConfig
 from data_polar import (
-    evaluate_direct_q_prior_flux,
     evaluate_polar_prior,
     inner_boundary_coords,
     outer_boundary_coords,
@@ -16,6 +15,7 @@ from data_polar import (
     sample_bnn_params,
     theta_to_hat,
 )
+from run_prior_ablation import _rms_preflight
 
 
 def _pressure_scalar(params, coord, sigma_r, config):
@@ -98,23 +98,8 @@ def test_boundary_rms_calibration_matches_direct_q_prior() -> None:
         PolarAnnulusConfig(pressure_prior_scaling="boundary_rms"),
         hidden_bnn=256,
     )
-    boundary = inner_boundary_coords(config)
-    key = jax.random.PRNGKey(91_177)
-    for sigma_theta, sigma_r in config.prior_scale_pairs:
-        key, params_key = jax.random.split(key)
-        params = sample_bnn_params(
-            params_key, 256, sigma_theta, sigma_r, config
-        )
-        values = evaluate_polar_prior(
-            params,
-            boundary,
-            jnp.ones((256,), dtype=jnp.float32),
-            sigma_r,
-            config,
-        )
-        p_flux_rms = jnp.sqrt(jnp.mean(values.q**2))
-        q_flux_rms = jnp.sqrt(
-            jnp.mean(evaluate_direct_q_prior_flux(params, boundary) ** 2)
-        )
-        mismatch = float(jnp.abs(p_flux_rms / q_flux_rms - 1.0))
-        assert mismatch <= 0.05, (sigma_r, mismatch)
+    records = _rms_preflight(config)
+    assert len(records) == len(config.prior_scale_pairs)
+    for record in records:
+        assert record["diagnostic_samples"] == 2_048
+        assert record["relative_mismatch"] <= 0.05, record
